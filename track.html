@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Track a complaint — CivicSync</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    @keyframes scaleIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .anim-scale { animation: scaleIn 0.25s cubic-bezier(0.16,1,0.3,1) forwards; }
+    .wipe-wrap { position: relative; overflow: hidden; border-radius: 0.75rem; }
+    .wipe-wrap img { display: block; width: 100%; height: 14rem; object-fit: cover; }
+    .wipe-after { position: absolute; inset: 0; }
+    .wipe-handle { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25); pointer-events: none; }
+    .wipe-range { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+    @media (prefers-reduced-motion: reduce) { .anim-scale { animation: none; } }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased min-h-screen flex flex-col font-sans">
+
+  <header class="bg-white border-b border-slate-200 shadow-sm">
+    <div class="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+      <a href="index.html" class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-md font-black text-lg">⚡</div>
+        <span class="font-extrabold text-base tracking-tight">Civic<span class="text-blue-600">Sync</span></span>
+      </a>
+      <select id="langSelect" onchange="setLang(this.value)"
+        class="px-2 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 outline-none focus:border-blue-600"></select>
+    </div>
+  </header>
+
+  <main class="max-w-2xl w-full mx-auto p-4 sm:p-6 flex-1 space-y-5">
+    <!-- Lookup -->
+    <div class="p-4 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-2">
+      <label class="text-xs font-bold text-slate-900">Complaint reference</label>
+      <div class="flex gap-2">
+        <input id="idInput" placeholder="TCK-2026-1234"
+          class="flex-1 p-3 rounded-xl border border-slate-200 text-xs font-mono font-bold outline-none focus:border-blue-600" />
+        <button onclick="lookup()" class="px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow transition">Track</button>
+      </div>
+      <p class="text-[10px] text-slate-400">Anyone with the reference can read this page. No account needed.</p>
+    </div>
+
+    <div id="result" class="space-y-5"></div>
+  </main>
+
+  <footer class="max-w-2xl w-full mx-auto px-4 pb-8 flex gap-4">
+    <a href="index.html" class="text-[10px] font-semibold text-slate-400 hover:text-slate-600">File your own report →</a>
+    <a href="dashboard.html" class="text-[10px] font-semibold text-slate-400 hover:text-slate-600">City dashboard →</a>
+  </footer>
+
+  <div id="toast" class="hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold shadow-2xl"></div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getFirestore, collection, query, where, onSnapshot }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    // =================================================================
+    // INLINED SHARED CODE
+    // Everything below used to live in civic-config.js / civic-shared.js /
+    // civic-ai.js. Those were ES modules, and a relative module import is
+    // fetched with CORS — which the browser blocks on file:// URLs. That
+    // killed the whole script before any button got wired up. Inlining it
+    // means these pages work by double-clicking them again.
+    //
+    // >>> THE GEMINI API KEY IS SET IN index.html, in this same block. <<<
+    // =================================================================
+        // ---------- inlined from civic-config.js ----------
+    // ============================================================================
+    // CivicSync — central configuration
+    // This is the ONLY file you need to edit to get the AI working.
+    // ============================================================================
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDwcOEWvYw0SVLPE2jkSjzfKRzJRj_GP4U",
+      authDomain: "civicsync-69010.firebaseapp.com",
+      projectId: "civicsync-69010",
+      storageBucket: "civicsync-69010.firebasestorage.app",
+      messagingSenderId: "328301187829",
+      appId: "1:328301187829:web:79e0841a695ef6c3feabbc"
+    };
+
+    // ---------------------------------------------------------------------------
+    // STEP 1 — Get a free key at https://aistudio.google.com/app/apikey
+    // STEP 2 — Paste it below. That's it. Text triage, photo vision and language
+    //          detection all switch from the keyword fallback to real Gemini calls.
+    // ---------------------------------------------------------------------------
+    const GEMINI_API_KEY = "PASTE_YOUR_GEMINI_API_KEY_HERE";
+
+    // gemini-2.0-flash is multimodal (text + image) and free-tier friendly.
+    const GEMINI_MODEL = "gemini-2.0-flash";
+    const GEMINI_ENDPOINT =
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+    // Authority portal credentials (unchanged from the original build).
+    const AUTHORITY_EMAIL = "admin@gov.in";
+    const AUTHORITY_PASSWORD = "GovAdmin2026!";
+    const AUTHORITY_SESSION_KEY = "civicsync_authority_session";
+
+    // ---- Duplicate clustering -------------------------------------------------
+    const DUPLICATE_RADIUS_M = 50;   // reports within this radius may merge
+    const DUPLICATE_WINDOW_DAYS = 3; // ...and within this many days
+
+    // ---- SLA windows, in hours, keyed by priority -----------------------------
+    const SLA_HOURS = {
+      critical: 4,
+      high: 24,
+      medium: 72,
+      low: 168
+    };
+
+    // Departments the AI is allowed to route to. Keep this list short and real —
+    // a constrained list is what stops the model inventing a "Department of Vibes".
+    const DEPARTMENTS = [
+      "DISCOM (Electricity)",
+      "Water Board",
+      "Sanitation",
+      "Public Works",
+      "Traffic Police",
+      "Parks & Horticulture",
+      "Animal Control",
+      "Public Health"
+    ];
+
+    const CATEGORIES = [
+      "Electrical Hazard",
+      "Water Supply / Leakage",
+      "Drainage & Sewage",
+      "Garbage & Sanitation",
+      "Road & Pothole",
+      "Streetlight",
+      "Traffic & Signage",
+      "Stray Animals",
+      "Public Health",
+      "Parks & Trees",
+      "Other"
+    ];
+
+        // ---------- inlined from civic-shared.js ----------
+    // ============================================================================
+    // CivicSync — shared helpers used by every page
+    // ============================================================================
+
+    // ---- Safety ---------------------------------------------------------------
+    // Ticket text is user-supplied and gets dropped into innerHTML all over the
+    // app. Run it through this first or a complaint containing "<img onerror=...>"
+    // becomes a script injection.
+    function esc(str) {
+      return String(str ?? '').replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    // ---- Geo ------------------------------------------------------------------
+    function haversineMeters(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    const CLUSTER_RADIUS_M = DUPLICATE_RADIUS_M;
+    const CLUSTER_WINDOW_MS = DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+    // ---- Priority / severity --------------------------------------------------
+    function priorityFromScore(score) {
+      if (score >= 85) return 'critical';
+      if (score >= 65) return 'high';
+      if (score >= 35) return 'medium';
+      return 'low';
+    }
+
+    function slaHoursFor(priority) {
+      return SLA_HOURS[priority] ?? SLA_HOURS.medium;
+    }
+
+    function slaLabel(hours) {
+      if (hours < 24) return `${hours}h SLA`;
+      return `${Math.round(hours / 24)}-Day SLA`;
+    }
+
+    function priorityColor(priority) {
+      return priority === 'critical' ? 'red'
+           : priority === 'high'     ? 'amber'
+           : priority === 'medium'   ? 'emerald'
+           : 'slate';
+    }
+
+    // Corroborating reports raise urgency: every 3 extra citizens adds 8 points,
+    // capped at +25 so a swarm of low-severity reports can't fake a critical.
+    function clusterBoost(reportCount) {
+      if (!reportCount || reportCount < 2) return 0;
+      return Math.min(25, Math.floor((reportCount - 1) / 3) * 8 + 4);
+    }
+
+    // ---- Timestamps -----------------------------------------------------------
+    // Firestore hands back Timestamp objects on live reads but plain Dates on the
+    // local echo of a just-written doc. Normalise both.
+    function toMillis(value) {
+      if (!value) return 0;
+      if (typeof value.toMillis === 'function') return value.toMillis();
+      if (value instanceof Date) return value.getTime();
+      if (typeof value === 'number') return value;
+      if (value.seconds) return value.seconds * 1000;
+      return 0;
+    }
+
+    function formatDuration(ms) {
+      const mins = Math.floor(Math.abs(ms) / 60000);
+      const d = Math.floor(mins / 1440);
+      const h = Math.floor((mins % 1440) / 60);
+      const m = mins % 60;
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+
+    function formatDate(value) {
+      const ms = toMillis(value);
+      if (!ms) return '—';
+      return new Date(ms).toLocaleString(undefined, {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+      });
+    }
+
+    // ---- SLA state ------------------------------------------------------------
+    // Returns everything a card needs to render a countdown chip.
+    function slaState(ticket) {
+      const status = ticket.status || 'Submitted';
+      const createdMs = toMillis(ticket.timestamp);
+      const hours = ticket.slaHours ?? slaHoursFor(ticket.priority || 'medium');
+      const deadlineMs = toMillis(ticket.slaDeadline) || (createdMs + hours * 3600000);
+
+      if (status === 'Resolved') {
+        const resolvedMs = toMillis(ticket.resolvedAt);
+        const withinSla = resolvedMs ? resolvedMs <= deadlineMs : true;
+        return {
+          resolved: true, overdue: false, withinSla, deadlineMs, msLeft: 0,
+          label: withinSla ? 'Closed within SLA' : 'Closed late',
+          tone: withinSla ? 'emerald' : 'slate'
+        };
+      }
+
+      const msLeft = deadlineMs - Date.now();
+      if (msLeft <= 0) {
+        return {
+          resolved: false, overdue: true, withinSla: false, deadlineMs, msLeft,
+          label: `Overdue by ${formatDuration(msLeft)}`, tone: 'red'
+        };
+      }
+      const tone = msLeft < 3600000 ? 'red' : msLeft < 6 * 3600000 ? 'amber' : 'slate';
+      return {
+        resolved: false, overdue: false, withinSla: true, deadlineMs, msLeft,
+        label: `${formatDuration(msLeft)} left`, tone
+      };
+    }
+
+    // ---- Civic score ----------------------------------------------------------
+    // 10 points to file, 15 more once an officer resolves it (that's the
+    // "verified" signal), 5 more if the report attracted corroboration.
+    function scoreForTicket(ticket) {
+      let pts = 10;
+      if ((ticket.status || '') === 'Resolved') pts += 15;
+      if ((ticket.reportCount || 1) > 1) pts += 5;
+      if (ticket.photoData) pts += 3;
+      return pts;
+    }
+
+    function civicRank(score) {
+      if (score >= 300) return { label: 'City Guardian', badge: '🏛️' };
+      if (score >= 150) return { label: 'Ward Champion', badge: '🥇' };
+      if (score >= 75)  return { label: 'Active Citizen', badge: '🥈' };
+      if (score >= 25)  return { label: 'Contributor', badge: '🥉' };
+      return { label: 'Newcomer', badge: '🌱' };
+    }
+
+    // ---- Languages ------------------------------------------------------------
+    // `speech` codes are BCP-47 tags the Web Speech API understands.
+    const LANGUAGES = [
+      { code: 'en', name: 'English',  native: 'English',  speech: 'en-IN' },
+      { code: 'hi', name: 'Hindi',    native: 'हिन्दी',    speech: 'hi-IN' },
+      { code: 'ta', name: 'Tamil',    native: 'தமிழ்',     speech: 'ta-IN' },
+      { code: 'kn', name: 'Kannada',  native: 'ಕನ್ನಡ',     speech: 'kn-IN' },
+      { code: 'te', name: 'Telugu',   native: 'తెలుగు',    speech: 'te-IN' },
+      { code: 'ml', name: 'Malayalam',native: 'മലയാളം',   speech: 'ml-IN' },
+      { code: 'mr', name: 'Marathi',  native: 'मराठी',     speech: 'mr-IN' },
+      { code: 'bn', name: 'Bengali',  native: 'বাংলা',     speech: 'bn-IN' }
+    ];
+
+    function langByCode(code) {
+      return LANGUAGES.find(l => l.code === code) || LANGUAGES[0];
+    }
+
+    // Status words and the handful of citizen-facing strings that must come back
+    // in the reporter's own language. Free-form text is translated by the model;
+    // these are fixed strings so a static table is faster and never wrong.
+    const STRINGS = {
+      en: { Submitted:'Submitted', Dispatched:'Team dispatched', 'On Hold':'On hold', Resolved:'Resolved',
+            critical:'Critical', high:'High', medium:'Medium', low:'Low',
+            yourReports:'Your reports', noReports:'No reports yet. File your first one.',
+            overdue:'Overdue', reportedBy:'citizens reported this', shareStatus:'Share status',
+            before:'Before', after:'After', speakNow:'Listening… speak now', micStart:'Speak your complaint' },
+      hi: { Submitted:'दर्ज किया गया', Dispatched:'टीम भेजी गई', 'On Hold':'रोका गया', Resolved:'समाधान हो गया',
+            critical:'अति गंभीर', high:'गंभीर', medium:'मध्यम', low:'कम',
+            yourReports:'आपकी शिकायतें', noReports:'अभी कोई शिकायत नहीं। पहली शिकायत दर्ज करें।',
+            overdue:'समय सीमा पार', reportedBy:'नागरिकों ने यह बताया', shareStatus:'स्थिति साझा करें',
+            before:'पहले', after:'बाद में', speakNow:'सुन रहे हैं… अब बोलिए', micStart:'अपनी शिकायत बोलें' },
+      ta: { Submitted:'சமர்ப்பிக்கப்பட்டது', Dispatched:'குழு அனுப்பப்பட்டது', 'On Hold':'நிறுத்தி வைக்கப்பட்டது', Resolved:'தீர்க்கப்பட்டது',
+            critical:'மிக அவசரம்', high:'அதிகம்', medium:'நடுத்தரம்', low:'குறைவு',
+            yourReports:'உங்கள் புகார்கள்', noReports:'இன்னும் புகார் இல்லை. முதல் புகாரைப் பதிவு செய்யுங்கள்.',
+            overdue:'காலம் கடந்தது', reportedBy:'குடிமக்கள் இதைப் புகாரளித்தனர்', shareStatus:'நிலையைப் பகிர',
+            before:'முன்பு', after:'பின்பு', speakNow:'கேட்கிறோம்… இப்போது பேசுங்கள்', micStart:'உங்கள் புகாரைப் பேசுங்கள்' },
+      kn: { Submitted:'ಸಲ್ಲಿಸಲಾಗಿದೆ', Dispatched:'ತಂಡ ಕಳುಹಿಸಲಾಗಿದೆ', 'On Hold':'ತಡೆಹಿಡಿಯಲಾಗಿದೆ', Resolved:'ಪರಿಹರಿಸಲಾಗಿದೆ',
+            critical:'ಅತಿ ಗಂಭೀರ', high:'ಗಂಭೀರ', medium:'ಮಧ್ಯಮ', low:'ಕಡಿಮೆ',
+            yourReports:'ನಿಮ್ಮ ದೂರುಗಳು', noReports:'ಇನ್ನೂ ದೂರು ಇಲ್ಲ. ಮೊದಲ ದೂರನ್ನು ದಾಖಲಿಸಿ.',
+            overdue:'ಕಾಲಮಿತಿ ಮೀರಿದೆ', reportedBy:'ನಾಗರಿಕರು ಇದನ್ನು ವರದಿ ಮಾಡಿದ್ದಾರೆ', shareStatus:'ಸ್ಥಿತಿ ಹಂಚಿಕೊಳ್ಳಿ',
+            before:'ಮೊದಲು', after:'ನಂತರ', speakNow:'ಕೇಳುತ್ತಿದ್ದೇವೆ… ಈಗ ಮಾತನಾಡಿ', micStart:'ನಿಮ್ಮ ದೂರನ್ನು ಹೇಳಿ' },
+      te: { Submitted:'సమర్పించబడింది', Dispatched:'బృందం పంపబడింది', 'On Hold':'నిలిపివేయబడింది', Resolved:'పరిష్కరించబడింది',
+            critical:'అత్యవసరం', high:'అధికం', medium:'మధ్యస్థం', low:'తక్కువ',
+            yourReports:'మీ ఫిర్యాదులు', noReports:'ఇంకా ఫిర్యాదు లేదు. మొదటిది నమోదు చేయండి.',
+            overdue:'గడువు దాటింది', reportedBy:'పౌరులు దీన్ని నివేదించారు', shareStatus:'స్థితిని పంచుకోండి',
+            before:'ముందు', after:'తరువాత', speakNow:'వింటున్నాం… ఇప్పుడు మాట్లాడండి', micStart:'మీ ఫిర్యాదు చెప్పండి' },
+      ml: { Submitted:'സമർപ്പിച്ചു', Dispatched:'സംഘത്തെ അയച്ചു', 'On Hold':'തടഞ്ഞുവച്ചു', Resolved:'പരിഹരിച്ചു',
+            critical:'അതീവ ഗുരുതരം', high:'ഗുരുതരം', medium:'ഇടത്തരം', low:'കുറവ്',
+            yourReports:'നിങ്ങളുടെ പരാതികൾ', noReports:'ഇതുവരെ പരാതിയില്ല. ആദ്യത്തേത് നൽകുക.',
+            overdue:'സമയപരിധി കഴിഞ്ഞു', reportedBy:'പൗരന്മാർ ഇത് റിപ്പോർട്ട് ചെയ്തു', shareStatus:'നില പങ്കിടുക',
+            before:'മുൻപ്', after:'ശേഷം', speakNow:'കേൾക്കുന്നു… ഇപ്പോൾ പറയൂ', micStart:'പരാതി പറയൂ' },
+      mr: { Submitted:'नोंदवले', Dispatched:'पथक पाठवले', 'On Hold':'थांबवले', Resolved:'निकाली',
+            critical:'अत्यंत गंभीर', high:'गंभीर', medium:'मध्यम', low:'कमी',
+            yourReports:'तुमच्या तक्रारी', noReports:'अजून तक्रार नाही. पहिली नोंदवा.',
+            overdue:'मुदत संपली', reportedBy:'नागरिकांनी हे कळवले', shareStatus:'स्थिती शेअर करा',
+            before:'आधी', after:'नंतर', speakNow:'ऐकत आहोत… आता बोला', micStart:'तुमची तक्रार बोला' },
+      bn: { Submitted:'জমা হয়েছে', Dispatched:'দল পাঠানো হয়েছে', 'On Hold':'স্থগিত', Resolved:'সমাধান হয়েছে',
+            critical:'অতি জরুরি', high:'জরুরি', medium:'মাঝারি', low:'কম',
+            yourReports:'আপনার অভিযোগ', noReports:'এখনো কোনো অভিযোগ নেই। প্রথমটি জমা দিন।',
+            overdue:'সময়সীমা পার', reportedBy:'নাগরিক এটি জানিয়েছেন', shareStatus:'অবস্থা শেয়ার করুন',
+            before:'আগে', after:'পরে', speakNow:'শুনছি… এখন বলুন', micStart:'আপনার অভিযোগ বলুন' }
+    };
+
+    function t(key, lang = 'en') {
+      return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+    }
+
+    // ---- Misc -----------------------------------------------------------------
+    function newTicketId() {
+      return 'TCK-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000);
+    }
+
+    function trackUrl(ticketId) {
+      const base = location.href.replace(/[^/]*$/, '');
+      return `${base}track.html?id=${encodeURIComponent(ticketId)}`;
+    }
+
+    // Pulls a ward-ish name out of whatever Nominatim gave us, so the public
+    // dashboard has something to group by.
+    function wardFromAddress(address) {
+      if (!address) return null;
+      return address.suburb || address.neighbourhood || address.city_district ||
+             address.county || address.state_district || null;
+    }
+
+        // ---------- inlined from civic-ai.js ----------
+    // ============================================================================
+    // CivicSync — AI triage engine
+    //
+    // One entry point: aiTriage({ text, photoDataUrl, langHint }).
+    // It calls Gemini Flash with the raw complaint (and the photo, if there is
+    // one) and gets structured JSON back. If there's no API key, or the call
+    // fails, or the model returns junk, it falls back to the original keyword
+    // rules so the demo never dies on stage.
+    // ============================================================================
+
+
+    function aiConfigured() {
+      return typeof GEMINI_API_KEY === 'string' &&
+             GEMINI_API_KEY.length > 20 &&
+             !GEMINI_API_KEY.startsWith('PASTE_');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Fallback: the original keyword rules, widened a bit. Used when the model
+    // isn't reachable. Marked engine:'fallback' so the UI can be honest about it.
+    // ---------------------------------------------------------------------------
+    const RULES = [
+      { score: 94, cat: 'Electrical Hazard',      dept: 'DISCOM (Electricity)', words: ['spark','wire','electric','shock','transformer','live cable','current'] },
+      { score: 88, cat: 'Drainage & Sewage',      dept: 'Sanitation',           words: ['sewage','manhole','open drain','overflow','drainage'] },
+      { score: 82, cat: 'Road & Pothole',         dept: 'Public Works',         words: ['pothole','crater','collapsed road','sinkhole','accident'] },
+      { score: 78, cat: 'Water Supply / Leakage', dept: 'Water Board',          words: ['water','leak','pipeline','burst','no supply'] },
+      { score: 70, cat: 'Stray Animals',          dept: 'Animal Control',       words: ['stray dog','snake','monkey','cattle','bite'] },
+      { score: 62, cat: 'Streetlight',            dept: 'Public Works',         words: ['streetlight','street light','dark','lamp post','pole light'] },
+      { score: 58, cat: 'Garbage & Sanitation',   dept: 'Sanitation',           words: ['garbage','trash','waste','dump','litter','stink'] },
+      { score: 55, cat: 'Traffic & Signage',      dept: 'Traffic Police',       words: ['signal','traffic','sign board','zebra','parking'] },
+      { score: 50, cat: 'Parks & Trees',          dept: 'Parks & Horticulture', words: ['tree','branch','park','playground','fallen'] }
+    ];
+
+    function keywordTriage(text) {
+      const lower = String(text || '').toLowerCase();
+      let hit = RULES.find(r => r.words.some(w => lower.includes(w)));
+      if (!hit) hit = { score: 40, cat: 'Other', dept: 'Public Works' };
+
+      // Urgency words nudge the score up a little.
+      let score = hit.score;
+      if (/urgent|danger|child|school|hospital|injur|fire|emergency|died|death/.test(lower)) {
+        score = Math.min(99, score + 8);
+      }
+      const priority = priorityFromScore(score);
+      return normalise({
+        category: hit.cat,
+        department: hit.dept,
+        severity_score: score,
+        priority,
+        reasoning: 'Matched on keywords — Gemini key not configured, using the offline rule engine.',
+        detected_language: 'en',
+        english_text: text,
+        summary: String(text || '').slice(0, 80),
+        spam_likelihood: 0,
+        photo_matches_complaint: null,
+        photo_findings: null
+      }, 'fallback');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Prompt
+    // ---------------------------------------------------------------------------
+    function buildPrompt(text, hasPhoto, langHint) {
+      const lang = langByCode(langHint || 'en');
+      return `You are the triage engine for an Indian municipal grievance system. A citizen has filed the complaint below. Assess it the way an experienced municipal duty officer would.
+
+    COMPLAINT TEXT (the citizen may be writing in ${lang.name} or any Indian language):
+    """
+    ${text || '(no text provided)'}
+    """
+
+    ${hasPhoto ? `An attached photo is included with this request. Look at it carefully and use it as evidence.` : `No photo was attached.`}
+
+    Return ONE JSON object and nothing else. No markdown, no code fences, no commentary.
+
+    {
+      "category": one of ${JSON.stringify(CATEGORIES)},
+      "department": one of ${JSON.stringify(DEPARTMENTS)},
+      "severity_score": integer 0-100,
+      "priority": "critical" | "high" | "medium" | "low",
+      "reasoning": one or two plain sentences a municipal officer would accept, in English,
+      "detected_language": ISO 639-1 code of the language the citizen wrote in,
+      "english_text": the complaint faithfully translated into English (echo it unchanged if already English),
+      "summary": under 12 words, English, suitable as a work-order title,
+      "spam_likelihood": integer 0-100, how likely this is a joke/test/abusive submission,
+      "photo_matches_complaint": true | false | null (null only if no photo was sent),
+      "photo_findings": one sentence describing what the photo actually shows, or null
+    }
+
+    SEVERITY CALIBRATION — anchor to these, do not inflate:
+    - 90-100: immediate threat to life. Live/sparking wires, collapsed structure, open manhole on a busy road, sewage inside homes, gas leak.
+    - 70-89: serious injury risk or large-scale disruption. Deep pothole on a main road, burst water main, no water for a whole street, transformer humming/smoking, stray dog pack near a school.
+    - 40-69: real problem, no immediate danger. Uncollected garbage, one dead streetlight, a leaking tap, a faded zebra crossing.
+    - 10-39: cosmetic or minor. Hairline crack, faded paint, one overgrown branch.
+    - 0-9: not a genuine civic issue.
+
+    Raise the score when the complaint mentions children, a school, a hospital, night-time, or an elderly person. Lower it when the wording is vague and there is no evidence of danger.
+
+    ${hasPhoto ? `PHOTO RULES — this matters:
+    - Judge severity from what the photo SHOWS, not only what the text CLAIMS. A photo of a hairline crack does not justify a 90 even if the text says "huge dangerous crater".
+    - Set "photo_matches_complaint" to false when the photo has nothing to do with the described issue (a selfie, a meme, a blank wall, an unrelated indoor scene). When it is false, cap severity_score at 20 and set spam_likelihood above 70.
+    - If the photo shows the issue is clearly worse than the text suggests, raise the score and say so in "reasoning".` : ''}`;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Normalise whatever comes back into a shape the app can rely on
+    // ---------------------------------------------------------------------------
+    function normalise(raw, engine) {
+      let score = Number(raw.severity_score);
+      if (!Number.isFinite(score)) score = 40;
+      score = Math.max(0, Math.min(100, Math.round(score)));
+
+      const spam = Math.max(0, Math.min(100, Number(raw.spam_likelihood) || 0));
+      const photoMatches = raw.photo_matches_complaint === null || raw.photo_matches_complaint === undefined
+        ? null : !!raw.photo_matches_complaint;
+
+      // Hard guard: a photo that contradicts the text can't produce a critical.
+      if (photoMatches === false) score = Math.min(score, 20);
+
+      const priority = ['critical','high','medium','low'].includes(raw.priority) && photoMatches !== false
+        ? raw.priority
+        : priorityFromScore(score);
+
+      const department = DEPARTMENTS.includes(raw.department) ? raw.department : 'Public Works';
+      const category = CATEGORIES.includes(raw.category) ? raw.category : 'Other';
+
+      return {
+        engine,
+        category,
+        department,
+        score,
+        priority,
+        slaHours: slaHoursFor(priority),
+        reasoning: String(raw.reasoning || '').slice(0, 400) || 'No reasoning returned.',
+        detectedLanguage: String(raw.detected_language || 'en').slice(0, 5).toLowerCase(),
+        englishText: String(raw.english_text || '').trim(),
+        summary: String(raw.summary || '').slice(0, 120),
+        spamLikelihood: spam,
+        photoMatches,
+        photoFindings: raw.photo_findings ? String(raw.photo_findings).slice(0, 300) : null
+      };
+    }
+
+    // ---------------------------------------------------------------------------
+    // The actual call
+    // ---------------------------------------------------------------------------
+    function splitDataUrl(dataUrl) {
+      const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(dataUrl || '');
+      if (!m) return null;
+      return { mimeType: m[1], data: m[2] };
+    }
+
+    async function aiTriage({ text, photoDataUrl = null, langHint = 'en' } = {}) {
+      if (!aiConfigured()) return keywordTriage(text);
+      if (!text && !photoDataUrl) return keywordTriage(text);
+
+      const parts = [{ text: buildPrompt(text, !!photoDataUrl, langHint) }];
+      const img = splitDataUrl(photoDataUrl);
+      if (img) parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+
+      try {
+        const res = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts }],
+            generationConfig: {
+              temperature: 0.15,
+              maxOutputTokens: 700,
+              responseMimeType: 'application/json'
+            }
+          })
+        });
+
+        if (!res.ok) throw new Error('Gemini HTTP ' + res.status);
+        const data = await res.json();
+        const out = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+        const cleaned = out.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleaned);
+        const result = normalise(parsed, 'gemini');
+        if (!result.englishText) result.englishText = text;
+        return result;
+      } catch (err) {
+        console.warn('[CivicSync] Gemini triage failed, falling back to keywords:', err);
+        const fb = keywordTriage(text);
+        fb.reasoning = 'AI service unreachable — scored by the offline rule engine instead.';
+        return fb;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Small translation helper, used to show an authority's free-text note back to
+    // the citizen in their own language.
+    // ---------------------------------------------------------------------------
+    async function translateText(text, targetLangCode) {
+      if (!aiConfigured() || !text || targetLangCode === 'en') return text;
+      const lang = langByCode(targetLangCode);
+      try {
+        const res = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{
+              text: `Translate the following into ${lang.name}. Reply with the translation only, no quotes or notes.\n\n${text}`
+            }] }],
+            generationConfig: { temperature: 0, maxOutputTokens: 300 }
+          })
+        });
+        const data = await res.json();
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text;
+      } catch {
+        return text;
+      }
+    }
+
+
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const complaintsRef = collection(db, 'complaints');
+
+    let lang = 'en';
+    let current = null;
+    let unsub = null;
+    let miniMap = null;
+
+    (function buildLangSelect() {
+      const sel = document.getElementById('langSelect');
+      sel.innerHTML = LANGUAGES.map(l => `<option value="${l.code}">${l.native}</option>`).join('');
+    })();
+
+    window.setLang = function(code) { lang = code; if (current) paint(current); };
+
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.innerText = msg;
+      el.classList.remove('hidden');
+      clearTimeout(window._t);
+      window._t = setTimeout(() => el.classList.add('hidden'), 2500);
+    }
+
+    window.wipe = function(id, value) {
+      const wrap = document.getElementById(id);
+      if (!wrap) return;
+      wrap.querySelector('.wipe-after').style.clipPath = `inset(0 0 0 ${value}%)`;
+      wrap.querySelector('.wipe-handle').style.left = `${value}%`;
+    };
+
+    window.shareThis = async function() {
+      if (!current) return;
+      const url = trackUrl(current.ticketId);
+      try {
+        if (navigator.share) { await navigator.share({ title: `CivicSync ${current.ticketId}`, url }); return; }
+        await navigator.clipboard.writeText(url);
+        toast('Link copied');
+      } catch (e) { if (e.name !== 'AbortError') window.prompt('Copy this link:', url); }
+    };
+
+    const STAGES = ['Submitted', 'Dispatched', 'Resolved'];
+
+    function paint(tk) {
+      const color = priorityColor(tk.priority);
+      const status = tk.status || 'Submitted';
+      const sla = slaState(tk);
+      const stageIdx = status === 'Resolved' ? 2 : status === 'Dispatched' ? 1 : 0;
+      const displayText = tk.originalText || tk.text;
+
+      const timeline = STAGES.map((s, i) => {
+        const done = i <= stageIdx;
+        const stamp = i === 0 ? formatDate(tk.timestamp)
+                    : i === 1 ? (tk.dispatchedAt ? formatDate(tk.dispatchedAt) : '')
+                    : (tk.resolvedAt ? formatDate(tk.resolvedAt) : '');
+        return `
+          <div class="flex gap-3">
+            <div class="flex flex-col items-center">
+              <div class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black ${
+                done ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-400'}">${done ? '✓' : i + 1}</div>
+              ${i < STAGES.length - 1 ? `<div class="w-0.5 flex-1 ${i < stageIdx ? 'bg-emerald-500' : 'bg-slate-200'}"></div>` : ''}
+            </div>
+            <div class="pb-4">
+              <div class="text-xs font-bold ${done ? 'text-slate-900' : 'text-slate-400'}">${esc(t(s, lang))}</div>
+              <div class="text-[10px] text-slate-400">${esc(stamp)}</div>
+            </div>
+          </div>`;
+      }).join('');
+
+      const beforeAfter = (tk.photoData && tk.resolutionPhotoData) ? `
+        <div class="space-y-1">
+          <div class="flex items-center justify-between text-[10px] font-bold text-slate-500">
+            <span>${esc(t('before', lang))}</span><span>${esc(t('after', lang))}</span>
+          </div>
+          <div class="wipe-wrap border border-slate-200" id="wipeTrack">
+            <img src="${tk.photoData}" alt="Before the repair" />
+            <div class="wipe-after" style="clip-path: inset(0 0 0 50%);">
+              <img src="${tk.resolutionPhotoData}" alt="After the repair" />
+            </div>
+            <div class="wipe-handle" style="left:50%"></div>
+            <input type="range" min="0" max="100" value="50" class="wipe-range"
+                   aria-label="Drag to compare before and after" oninput="wipe('wipeTrack', this.value)" />
+          </div>
+        </div>` : (tk.photoData ? `<img src="${tk.photoData}" class="w-full h-52 object-cover rounded-xl border border-slate-200" alt="Reported issue" />` : '');
+
+      document.getElementById('result').innerHTML = `
+        <div class="p-5 rounded-3xl bg-white border ${sla.overdue ? 'border-red-300' : 'border-slate-200'} shadow-lg space-y-4 anim-scale">
+          <div class="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div class="font-mono text-lg font-black text-blue-600">${esc(tk.ticketId)}</div>
+              <div class="text-[11px] text-slate-500">${esc(tk.location || '')}</div>
+            </div>
+            <button onclick="shareThis()" class="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow transition">🔗 ${esc(t('shareStatus', lang))}</button>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-${color}-100 text-${color}-700">${esc(t(tk.priority, lang))}</span>
+            <span class="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">${esc(t(status, lang))}</span>
+            <span class="text-[10px] font-black px-2 py-0.5 rounded-full bg-${sla.tone}-100 text-${sla.tone}-700">⏱️ ${esc(sla.label)}</span>
+            ${(tk.reportCount || 1) > 1 ? `<span class="text-[10px] font-black px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">👥 ${tk.reportCount} ${esc(t('reportedBy', lang))}</span>` : ''}
+          </div>
+
+          <p class="text-sm font-bold leading-relaxed">${esc(displayText)}</p>
+          <div class="text-[11px] text-slate-500">🏢 ${esc(tk.department || '')} &bull; 🗂️ ${esc(tk.category || '')}</div>
+
+          ${beforeAfter}
+
+          <div class="pt-2 border-t border-slate-100">${timeline}</div>
+
+          ${typeof tk.lat === 'number' ? `<div id="miniMap" class="h-48 w-full rounded-xl border border-slate-200 overflow-hidden"></div>` : ''}
+        </div>`;
+
+      if (typeof tk.lat === 'number') {
+        setTimeout(() => {
+          if (miniMap) { miniMap.remove(); miniMap = null; }
+          miniMap = L.map('miniMap', { zoomControl: false, attributionControl: false }).setView([tk.lat, tk.lng], 16);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(miniMap);
+          L.marker([tk.lat, tk.lng]).addTo(miniMap);
+          setTimeout(() => miniMap.invalidateSize(), 100);
+        }, 0);
+      }
+    }
+
+    window.lookup = function() {
+      const id = document.getElementById('idInput').value.trim();
+      if (!id) return;
+      history.replaceState(null, '', `?id=${encodeURIComponent(id)}`);
+      if (unsub) unsub();
+
+      document.getElementById('result').innerHTML =
+        `<div class="text-center text-xs text-slate-400 py-10">Looking up ${esc(id)}…</div>`;
+
+      unsub = onSnapshot(query(complaintsRef, where('ticketId', '==', id)), (snap) => {
+        if (snap.empty) {
+          current = null;
+          document.getElementById('result').innerHTML =
+            `<div class="p-6 rounded-3xl bg-white border border-slate-200 text-center space-y-2">
+               <div class="text-2xl">🔍</div>
+               <div class="text-xs font-bold text-slate-700">No complaint found with reference ${esc(id)}</div>
+               <div class="text-[11px] text-slate-500">Check the reference and try again — it looks like TCK-2026-1234.</div>
+             </div>`;
+          return;
+        }
+        current = snap.docs[0].data();
+        paint(current);
+      }, (err) => {
+        console.error(err);
+        document.getElementById('result').innerHTML =
+          `<div class="text-center text-xs text-red-500 py-10">Couldn't reach the ticket register.</div>`;
+      });
+    };
+
+    document.getElementById('idInput').addEventListener('keydown', e => { if (e.key === 'Enter') lookup(); });
+
+    const preset = new URLSearchParams(location.search).get('id');
+    if (preset) {
+      document.getElementById('idInput').value = preset;
+      lookup();
+    }
+  </script>
+</body>
+</html>
