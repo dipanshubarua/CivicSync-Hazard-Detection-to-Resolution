@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CivicSync — City Transparency Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <style>
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    @keyframes scaleIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .anim-scale { animation: scaleIn 0.25s cubic-bezier(0.16,1,0.3,1) forwards; }
+    .bar { transition: width .6s cubic-bezier(0.16,1,0.3,1); }
+    @media (prefers-reduced-motion: reduce) { .anim-scale, .bar { animation: none; transition: none; } }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased min-h-screen flex flex-col font-sans">
+
+  <header class="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+      <a href="index.html" class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-md font-black text-lg">⚡</div>
+        <div class="flex items-center gap-2">
+          <span class="font-extrabold text-base sm:text-lg tracking-tight">Civic<span class="text-blue-600">Sync</span></span>
+          <span class="px-2 py-0.5 text-[10px] font-bold uppercase bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200">Open Data</span>
+        </div>
+      </a>
+      <div class="flex items-center gap-2 text-xs font-bold">
+        <a href="index.html" class="px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 transition">Report an issue</a>
+        <a href="authority.html" class="hidden sm:inline px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 transition">Officer login</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl w-full mx-auto p-4 sm:p-6 flex-1 space-y-6">
+
+    <section class="rounded-3xl bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 text-white p-6 sm:p-9 shadow-xl anim-scale">
+      <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight">How this city is doing on civic complaints</h1>
+      <p class="text-slate-300 text-xs sm:text-sm mt-2 max-w-2xl">Every figure here is computed live from the same ticket database the officers work from. Nothing is filtered, and no login is needed to read it.</p>
+      <p class="text-[11px] text-slate-400 mt-3" id="lastUpdated">Loading…</p>
+    </section>
+
+    <!-- Headline numbers -->
+    <section class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+      <div class="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
+        <div class="text-[10px] font-bold uppercase text-slate-500">Reports filed</div>
+        <div class="text-2xl font-black" id="kpiTotal">—</div>
+      </div>
+      <div class="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
+        <div class="text-[10px] font-bold uppercase text-slate-500">Resolution rate</div>
+        <div class="text-2xl font-black text-emerald-600" id="kpiRate">—</div>
+      </div>
+      <div class="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
+        <div class="text-[10px] font-bold uppercase text-slate-500">Avg. time to resolve</div>
+        <div class="text-2xl font-black" id="kpiAvg">—</div>
+      </div>
+      <div class="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
+        <div class="text-[10px] font-bold uppercase text-slate-500">Met their SLA</div>
+        <div class="text-2xl font-black" id="kpiSla">—</div>
+      </div>
+      <div class="p-4 rounded-2xl bg-white border border-red-200 shadow-sm">
+        <div class="text-[10px] font-bold uppercase text-red-600">Currently overdue</div>
+        <div class="text-2xl font-black text-red-600" id="kpiOverdue">—</div>
+      </div>
+    </section>
+
+    <!-- Heatmap -->
+    <section class="rounded-3xl bg-white border border-slate-200 shadow-lg overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-sm font-black">Where the city hurts</h2>
+          <p class="text-[11px] text-slate-500">Hotspots weighted by severity. Brighter means more, or more serious, reports.</p>
+        </div>
+        <div class="flex items-center gap-1 text-[11px] font-bold">
+          <button data-hm="all"      onclick="setHeatFilter('all')"      class="hm-btn px-2.5 py-1 rounded-lg border transition">All</button>
+          <button data-hm="open"     onclick="setHeatFilter('open')"     class="hm-btn px-2.5 py-1 rounded-lg border transition">Unresolved</button>
+          <button data-hm="critical" onclick="setHeatFilter('critical')" class="hm-btn px-2.5 py-1 rounded-lg border transition">Critical</button>
+        </div>
+      </div>
+      <div id="heatMap" class="h-96 w-full bg-slate-100"></div>
+    </section>
+
+    <div class="grid lg:grid-cols-2 gap-6">
+      <!-- By department -->
+      <section class="p-5 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+        <div>
+          <h2 class="text-sm font-black">Departments, ranked by how much they close</h2>
+          <p class="text-[11px] text-slate-500">Resolution rate across every ticket routed to them.</p>
+        </div>
+        <div id="deptTable" class="space-y-3 text-xs"></div>
+      </section>
+
+      <!-- By ward -->
+      <section class="p-5 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+        <div>
+          <h2 class="text-sm font-black">Wards by report volume</h2>
+          <p class="text-[11px] text-slate-500">Where complaints are coming from, and how many are still open.</p>
+        </div>
+        <div id="wardTable" class="space-y-3 text-xs"></div>
+      </section>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6">
+      <!-- Categories -->
+      <section class="p-5 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+        <div>
+          <h2 class="text-sm font-black">What people report</h2>
+          <p class="text-[11px] text-slate-500">Issue categories assigned by the triage model.</p>
+        </div>
+        <div id="catTable" class="space-y-3 text-xs"></div>
+      </section>
+
+      <!-- Leaderboard -->
+      <section id="leaderboard" class="p-5 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+        <div>
+          <h2 class="text-sm font-black">Most active citizens</h2>
+          <p class="text-[11px] text-slate-500">Civic score: 10 points per report, 15 more once an officer verifies and closes it.</p>
+        </div>
+        <div id="leaderTable" class="space-y-2 text-xs"></div>
+      </section>
+    </div>
+
+    <!-- Recently closed, with proof -->
+    <section class="p-5 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+      <div>
+        <h2 class="text-sm font-black">Recently fixed</h2>
+        <p class="text-[11px] text-slate-500">Each one carries a field photo taken after the repair.</p>
+      </div>
+      <div id="recentFixed" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+  </main>
+
+  <footer class="max-w-6xl w-full mx-auto px-4 sm:px-6 pb-8 text-[10px] text-slate-400">
+    Figures recompute on every change to the ticket database. Map data © OpenStreetMap contributors.
+  </footer>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getFirestore, collection, onSnapshot }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    // =================================================================
+    // INLINED SHARED CODE
+    // Everything below used to live in civic-config.js / civic-shared.js /
+    // civic-ai.js. Those were ES modules, and a relative module import is
+    // fetched with CORS — which the browser blocks on file:// URLs. That
+    // killed the whole script before any button got wired up. Inlining it
+    // means these pages work by double-clicking them again.
+    //
+    // =================================================================
+        // ---------- inlined from civic-config.js ----------
+    // ============================================================================
+    // CivicSync — central configuration
+    // Runtime secrets are supplied by the local backend; do not put them in HTML.
+    // ============================================================================
+
+    // Runtime configuration is served by the local backend so no API keys are committed to Git.
+    const runtimeConfigResponse = await fetch('/api/config', { cache: 'no-store' });
+    if (!runtimeConfigResponse.ok) throw new Error('CivicSync runtime configuration is unavailable.');
+    const runtimeConfig = await runtimeConfigResponse.json();
+    const firebaseConfig = runtimeConfig.firebaseConfig;
+    const GEMINI_MODEL = runtimeConfig.geminiModel || 'gemini-2.0-flash';
+    const GEMINI_ENDPOINT = '/api/gemini';
+
+    // ---- Duplicate clustering -------------------------------------------------
+    const DUPLICATE_RADIUS_M = 50;   // reports within this radius may merge
+    const DUPLICATE_WINDOW_DAYS = 3; // ...and within this many days
+
+    // ---- SLA windows, in hours, keyed by priority -----------------------------
+    const SLA_HOURS = {
+      critical: 4,
+      high: 24,
+      medium: 72,
+      low: 168
+    };
+
+    // Departments the AI is allowed to route to. Keep this list short and real —
+    // a constrained list is what stops the model inventing a "Department of Vibes".
+    const DEPARTMENTS = [
+      "DISCOM (Electricity)",
+      "Water Board",
+      "Sanitation",
+      "Public Works",
+      "Traffic Police",
+      "Parks & Horticulture",
+      "Animal Control",
+      "Public Health"
+    ];
+
+    const CATEGORIES = [
+      "Electrical Hazard",
+      "Water Supply / Leakage",
+      "Drainage & Sewage",
+      "Garbage & Sanitation",
+      "Road & Pothole",
+      "Streetlight",
+      "Traffic & Signage",
+      "Stray Animals",
+      "Public Health",
+      "Parks & Trees",
+      "Other"
+    ];
+
+        // ---------- inlined from civic-shared.js ----------
+    // ============================================================================
+    // CivicSync — shared helpers used by every page
+    // ============================================================================
+
+    // ---- Safety ---------------------------------------------------------------
+    // Ticket text is user-supplied and gets dropped into innerHTML all over the
+    // app. Run it through this first or a complaint containing "<img onerror=...>"
+    // becomes a script injection.
+    function esc(str) {
+      return String(str ?? '').replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    // ---- Geo ------------------------------------------------------------------
+    function haversineMeters(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    const CLUSTER_RADIUS_M = DUPLICATE_RADIUS_M;
+    const CLUSTER_WINDOW_MS = DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+    // ---- Priority / severity --------------------------------------------------
+    function priorityFromScore(score) {
+      if (score >= 85) return 'critical';
+      if (score >= 65) return 'high';
+      if (score >= 35) return 'medium';
+      return 'low';
+    }
+
+    function slaHoursFor(priority) {
+      return SLA_HOURS[priority] ?? SLA_HOURS.medium;
+    }
+
+    function slaLabel(hours) {
+      if (hours < 24) return `${hours}h SLA`;
+      return `${Math.round(hours / 24)}-Day SLA`;
+    }
+
+    function priorityColor(priority) {
+      return priority === 'critical' ? 'red'
+           : priority === 'high'     ? 'amber'
+           : priority === 'medium'   ? 'emerald'
+           : 'slate';
+    }
+
+    // Corroborating reports raise urgency: every 3 extra citizens adds 8 points,
+    // capped at +25 so a swarm of low-severity reports can't fake a critical.
+    function clusterBoost(reportCount) {
+      if (!reportCount || reportCount < 2) return 0;
+      return Math.min(25, Math.floor((reportCount - 1) / 3) * 8 + 4);
+    }
+
+    // ---- Timestamps -----------------------------------------------------------
+    // Firestore hands back Timestamp objects on live reads but plain Dates on the
+    // local echo of a just-written doc. Normalise both.
+    function toMillis(value) {
+      if (!value) return 0;
+      if (typeof value.toMillis === 'function') return value.toMillis();
+      if (value instanceof Date) return value.getTime();
+      if (typeof value === 'number') return value;
+      if (value.seconds) return value.seconds * 1000;
+      return 0;
+    }
+
+    function formatDuration(ms) {
+      const mins = Math.floor(Math.abs(ms) / 60000);
+      const d = Math.floor(mins / 1440);
+      const h = Math.floor((mins % 1440) / 60);
+      const m = mins % 60;
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+
+    function formatDate(value) {
+      const ms = toMillis(value);
+      if (!ms) return '—';
+      return new Date(ms).toLocaleString(undefined, {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+      });
+    }
+
+    // ---- SLA state ------------------------------------------------------------
+    // Returns everything a card needs to render a countdown chip.
+    function slaState(ticket) {
+      const status = ticket.status || 'Submitted';
+      const createdMs = toMillis(ticket.timestamp);
+      const hours = ticket.slaHours ?? slaHoursFor(ticket.priority || 'medium');
+      const deadlineMs = toMillis(ticket.slaDeadline) || (createdMs + hours * 3600000);
+
+      if (status === 'Resolved') {
+        const resolvedMs = toMillis(ticket.resolvedAt);
+        const withinSla = resolvedMs ? resolvedMs <= deadlineMs : true;
+        return {
+          resolved: true, overdue: false, withinSla, deadlineMs, msLeft: 0,
+          label: withinSla ? 'Closed within SLA' : 'Closed late',
+          tone: withinSla ? 'emerald' : 'slate'
+        };
+      }
+
+      const msLeft = deadlineMs - Date.now();
+      if (msLeft <= 0) {
+        return {
+          resolved: false, overdue: true, withinSla: false, deadlineMs, msLeft,
+          label: `Overdue by ${formatDuration(msLeft)}`, tone: 'red'
+        };
+      }
+      const tone = msLeft < 3600000 ? 'red' : msLeft < 6 * 3600000 ? 'amber' : 'slate';
+      return {
+        resolved: false, overdue: false, withinSla: true, deadlineMs, msLeft,
+        label: `${formatDuration(msLeft)} left`, tone
+      };
+    }
+
+    // ---- Civic score ----------------------------------------------------------
+    // 10 points to file, 15 more once an officer resolves it (that's the
+    // "verified" signal), 5 more if the report attracted corroboration.
+    function scoreForTicket(ticket) {
+      let pts = 10;
+      if ((ticket.status || '') === 'Resolved') pts += 15;
+      if ((ticket.reportCount || 1) > 1) pts += 5;
+      if (ticket.photoData) pts += 3;
+      return pts;
+    }
+
+    function civicRank(score) {
+      if (score >= 300) return { label: 'City Guardian', badge: '🏛️' };
+      if (score >= 150) return { label: 'Ward Champion', badge: '🥇' };
+      if (score >= 75)  return { label: 'Active Citizen', badge: '🥈' };
+      if (score >= 25)  return { label: 'Contributor', badge: '🥉' };
+      return { label: 'Newcomer', badge: '🌱' };
+    }
+
+    // ---- Languages ------------------------------------------------------------
+    // `speech` codes are BCP-47 tags the Web Speech API understands.
+    const LANGUAGES = [
+      { code: 'en', name: 'English',  native: 'English',  speech: 'en-IN' },
+      { code: 'hi', name: 'Hindi',    native: 'हिन्दी',    speech: 'hi-IN' },
+      { code: 'ta', name: 'Tamil',    native: 'தமிழ்',     speech: 'ta-IN' },
+      { code: 'kn', name: 'Kannada',  native: 'ಕನ್ನಡ',     speech: 'kn-IN' },
+      { code: 'te', name: 'Telugu',   native: 'తెలుగు',    speech: 'te-IN' },
+      { code: 'ml', name: 'Malayalam',native: 'മലയാളം',   speech: 'ml-IN' },
+      { code: 'mr', name: 'Marathi',  native: 'मराठी',     speech: 'mr-IN' },
+      { code: 'bn', name: 'Bengali',  native: 'বাংলা',     speech: 'bn-IN' }
+    ];
+
+    function langByCode(code) {
+      return LANGUAGES.find(l => l.code === code) || LANGUAGES[0];
+    }
+
+    // Status words and the handful of citizen-facing strings that must come back
+    // in the reporter's own language. Free-form text is translated by the model;
+    // these are fixed strings so a static table is faster and never wrong.
+    const STRINGS = {
+      en: { Submitted:'Submitted', Dispatched:'Team dispatched', 'On Hold':'On hold', Resolved:'Resolved',
+            critical:'Critical', high:'High', medium:'Medium', low:'Low',
+            yourReports:'Your reports', noReports:'No reports yet. File your first one.',
+            overdue:'Overdue', reportedBy:'citizens reported this', shareStatus:'Share status',
+            before:'Before', after:'After', speakNow:'Listening… speak now', micStart:'Speak your complaint' },
+      hi: { Submitted:'दर्ज किया गया', Dispatched:'टीम भेजी गई', 'On Hold':'रोका गया', Resolved:'समाधान हो गया',
+            critical:'अति गंभीर', high:'गंभीर', medium:'मध्यम', low:'कम',
+            yourReports:'आपकी शिकायतें', noReports:'अभी कोई शिकायत नहीं। पहली शिकायत दर्ज करें।',
+            overdue:'समय सीमा पार', reportedBy:'नागरिकों ने यह बताया', shareStatus:'स्थिति साझा करें',
+            before:'पहले', after:'बाद में', speakNow:'सुन रहे हैं… अब बोलिए', micStart:'अपनी शिकायत बोलें' },
+      ta: { Submitted:'சமர்ப்பிக்கப்பட்டது', Dispatched:'குழு அனுப்பப்பட்டது', 'On Hold':'நிறுத்தி வைக்கப்பட்டது', Resolved:'தீர்க்கப்பட்டது',
+            critical:'மிக அவசரம்', high:'அதிகம்', medium:'நடுத்தரம்', low:'குறைவு',
+            yourReports:'உங்கள் புகார்கள்', noReports:'இன்னும் புகார் இல்லை. முதல் புகாரைப் பதிவு செய்யுங்கள்.',
+            overdue:'காலம் கடந்தது', reportedBy:'குடிமக்கள் இதைப் புகாரளித்தனர்', shareStatus:'நிலையைப் பகிர',
+            before:'முன்பு', after:'பின்பு', speakNow:'கேட்கிறோம்… இப்போது பேசுங்கள்', micStart:'உங்கள் புகாரைப் பேசுங்கள்' },
+      kn: { Submitted:'ಸಲ್ಲಿಸಲಾಗಿದೆ', Dispatched:'ತಂಡ ಕಳುಹಿಸಲಾಗಿದೆ', 'On Hold':'ತಡೆಹಿಡಿಯಲಾಗಿದೆ', Resolved:'ಪರಿಹರಿಸಲಾಗಿದೆ',
+            critical:'ಅತಿ ಗಂಭೀರ', high:'ಗಂಭೀರ', medium:'ಮಧ್ಯಮ', low:'ಕಡಿಮೆ',
+            yourReports:'ನಿಮ್ಮ ದೂರುಗಳು', noReports:'ಇನ್ನೂ ದೂರು ಇಲ್ಲ. ಮೊದಲ ದೂರನ್ನು ದಾಖಲಿಸಿ.',
+            overdue:'ಕಾಲಮಿತಿ ಮೀರಿದೆ', reportedBy:'ನಾಗರಿಕರು ಇದನ್ನು ವರದಿ ಮಾಡಿದ್ದಾರೆ', shareStatus:'ಸ್ಥಿತಿ ಹಂಚಿಕೊಳ್ಳಿ',
+            before:'ಮೊದಲು', after:'ನಂತರ', speakNow:'ಕೇಳುತ್ತಿದ್ದೇವೆ… ಈಗ ಮಾತನಾಡಿ', micStart:'ನಿಮ್ಮ ದೂರನ್ನು ಹೇಳಿ' },
+      te: { Submitted:'సమర్పించబడింది', Dispatched:'బృందం పంపబడింది', 'On Hold':'నిలిపివేయబడింది', Resolved:'పరిష్కరించబడింది',
+            critical:'అత్యవసరం', high:'అధికం', medium:'మధ్యస్థం', low:'తక్కువ',
+            yourReports:'మీ ఫిర్యాదులు', noReports:'ఇంకా ఫిర్యాదు లేదు. మొదటిది నమోదు చేయండి.',
+            overdue:'గడువు దాటింది', reportedBy:'పౌరులు దీన్ని నివేదించారు', shareStatus:'స్థితిని పంచుకోండి',
+            before:'ముందు', after:'తరువాత', speakNow:'వింటున్నాం… ఇప్పుడు మాట్లాడండి', micStart:'మీ ఫిర్యాదు చెప్పండి' },
+      ml: { Submitted:'സമർപ്പിച്ചു', Dispatched:'സംഘത്തെ അയച്ചു', 'On Hold':'തടഞ്ഞുവച്ചു', Resolved:'പരിഹരിച്ചു',
+            critical:'അതീവ ഗുരുതരം', high:'ഗുരുതരം', medium:'ഇടത്തരം', low:'കുറവ്',
+            yourReports:'നിങ്ങളുടെ പരാതികൾ', noReports:'ഇതുവരെ പരാതിയില്ല. ആദ്യത്തേത് നൽകുക.',
+            overdue:'സമയപരിധി കഴിഞ്ഞു', reportedBy:'പൗരന്മാർ ഇത് റിപ്പോർട്ട് ചെയ്തു', shareStatus:'നില പങ്കിടുക',
+            before:'മുൻപ്', after:'ശേഷം', speakNow:'കേൾക്കുന്നു… ഇപ്പോൾ പറയൂ', micStart:'പരാതി പറയൂ' },
+      mr: { Submitted:'नोंदवले', Dispatched:'पथक पाठवले', 'On Hold':'थांबवले', Resolved:'निकाली',
+            critical:'अत्यंत गंभीर', high:'गंभीर', medium:'मध्यम', low:'कमी',
+            yourReports:'तुमच्या तक्रारी', noReports:'अजून तक्रार नाही. पहिली नोंदवा.',
+            overdue:'मुदत संपली', reportedBy:'नागरिकांनी हे कळवले', shareStatus:'स्थिती शेअर करा',
+            before:'आधी', after:'नंतर', speakNow:'ऐकत आहोत… आता बोला', micStart:'तुमची तक्रार बोला' },
+      bn: { Submitted:'জমা হয়েছে', Dispatched:'দল পাঠানো হয়েছে', 'On Hold':'স্থগিত', Resolved:'সমাধান হয়েছে',
+            critical:'অতি জরুরি', high:'জরুরি', medium:'মাঝারি', low:'কম',
+            yourReports:'আপনার অভিযোগ', noReports:'এখনো কোনো অভিযোগ নেই। প্রথমটি জমা দিন।',
+            overdue:'সময়সীমা পার', reportedBy:'নাগরিক এটি জানিয়েছেন', shareStatus:'অবস্থা শেয়ার করুন',
+            before:'আগে', after:'পরে', speakNow:'শুনছি… এখন বলুন', micStart:'আপনার অভিযোগ বলুন' }
+    };
+
+    function t(key, lang = 'en') {
+      return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+    }
+
+    // ---- Misc -----------------------------------------------------------------
+    function newTicketId() {
+      return 'TCK-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000);
+    }
+
+    function trackUrl(ticketId) {
+      const base = location.href.replace(/[^/]*$/, '');
+      return `${base}track.html?id=${encodeURIComponent(ticketId)}`;
+    }
+
+    // Pulls a ward-ish name out of whatever Nominatim gave us, so the public
+    // dashboard has something to group by.
+    function wardFromAddress(address) {
+      if (!address) return null;
+      return address.suburb || address.neighbourhood || address.city_district ||
+             address.county || address.state_district || null;
+    }
+
+        // ---------- inlined from civic-ai.js ----------
+    // ============================================================================
+    // CivicSync — AI triage engine
+    //
+    // One entry point: aiTriage({ text, photoDataUrl, langHint }).
+    // It calls Gemini Flash with the raw complaint (and the photo, if there is
+    // one) and gets structured JSON back. If there's no API key, or the call
+    // fails, or the model returns junk, it falls back to the original keyword
+    // rules so the demo never dies on stage.
+    // ============================================================================
+
+
+    function aiConfigured() {
+      return typeof GEMINI_ENDPOINT === 'string' && GEMINI_ENDPOINT.startsWith('/api/');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Fallback: the original keyword rules, widened a bit. Used when the model
+    // isn't reachable. Marked engine:'fallback' so the UI can be honest about it.
+    // ---------------------------------------------------------------------------
+    const RULES = [
+      { score: 94, cat: 'Electrical Hazard',      dept: 'DISCOM (Electricity)', words: ['spark','wire','electric','shock','transformer','live cable','current'] },
+      { score: 88, cat: 'Drainage & Sewage',      dept: 'Sanitation',           words: ['sewage','manhole','open drain','overflow','drainage'] },
+      { score: 82, cat: 'Road & Pothole',         dept: 'Public Works',         words: ['pothole','crater','collapsed road','sinkhole','accident'] },
+      { score: 78, cat: 'Water Supply / Leakage', dept: 'Water Board',          words: ['water','leak','pipeline','burst','no supply'] },
+      { score: 70, cat: 'Stray Animals',          dept: 'Animal Control',       words: ['stray dog','snake','monkey','cattle','bite'] },
+      { score: 62, cat: 'Streetlight',            dept: 'Public Works',         words: ['streetlight','street light','dark','lamp post','pole light'] },
+      { score: 58, cat: 'Garbage & Sanitation',   dept: 'Sanitation',           words: ['garbage','trash','waste','dump','litter','stink'] },
+      { score: 55, cat: 'Traffic & Signage',      dept: 'Traffic Police',       words: ['signal','traffic','sign board','zebra','parking'] },
+      { score: 50, cat: 'Parks & Trees',          dept: 'Parks & Horticulture', words: ['tree','branch','park','playground','fallen'] }
+    ];
+
+    function keywordTriage(text) {
+      const lower = String(text || '').toLowerCase();
+      let hit = RULES.find(r => r.words.some(w => lower.includes(w)));
+      if (!hit) hit = { score: 40, cat: 'Other', dept: 'Public Works' };
+
+      // Urgency words nudge the score up a little.
+      let score = hit.score;
+      if (/urgent|danger|child|school|hospital|injur|fire|emergency|died|death/.test(lower)) {
+        score = Math.min(99, score + 8);
+      }
+      const priority = priorityFromScore(score);
+      return normalise({
+        category: hit.cat,
+        department: hit.dept,
+        severity_score: score,
+        priority,
+        reasoning: 'Matched on keywords — Gemini key not configured, using the offline rule engine.',
+        detected_language: 'en',
+        english_text: text,
+        summary: String(text || '').slice(0, 80),
+        spam_likelihood: 0,
+        photo_matches_complaint: null,
+        photo_findings: null
+      }, 'fallback');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Prompt
+    // ---------------------------------------------------------------------------
+    function buildPrompt(text, hasPhoto, langHint) {
+      const lang = langByCode(langHint || 'en');
+      return `You are the triage engine for an Indian municipal grievance system. A citizen has filed the complaint below. Assess it the way an experienced municipal duty officer would.
+
+    COMPLAINT TEXT (the citizen may be writing in ${lang.name} or any Indian language):
+    """
+    ${text || '(no text provided)'}
+    """
+
+    ${hasPhoto ? `An attached photo is included with this request. Look at it carefully and use it as evidence.` : `No photo was attached.`}
+
+    Return ONE JSON object and nothing else. No markdown, no code fences, no commentary.
+
+    {
+      "category": one of ${JSON.stringify(CATEGORIES)},
+      "department": one of ${JSON.stringify(DEPARTMENTS)},
+      "severity_score": integer 0-100,
+      "priority": "critical" | "high" | "medium" | "low",
+      "reasoning": one or two plain sentences a municipal officer would accept, in English,
+      "detected_language": ISO 639-1 code of the language the citizen wrote in,
+      "english_text": the complaint faithfully translated into English (echo it unchanged if already English),
+      "summary": under 12 words, English, suitable as a work-order title,
+      "spam_likelihood": integer 0-100, how likely this is a joke/test/abusive submission,
+      "photo_matches_complaint": true | false | null (null only if no photo was sent),
+      "photo_findings": one sentence describing what the photo actually shows, or null
+    }
+
+    SEVERITY CALIBRATION — anchor to these, do not inflate:
+    - 90-100: immediate threat to life. Live/sparking wires, collapsed structure, open manhole on a busy road, sewage inside homes, gas leak.
+    - 70-89: serious injury risk or large-scale disruption. Deep pothole on a main road, burst water main, no water for a whole street, transformer humming/smoking, stray dog pack near a school.
+    - 40-69: real problem, no immediate danger. Uncollected garbage, one dead streetlight, a leaking tap, a faded zebra crossing.
+    - 10-39: cosmetic or minor. Hairline crack, faded paint, one overgrown branch.
+    - 0-9: not a genuine civic issue.
+
+    Raise the score when the complaint mentions children, a school, a hospital, night-time, or an elderly person. Lower it when the wording is vague and there is no evidence of danger.
+
+    ${hasPhoto ? `PHOTO RULES — this matters:
+    - Judge severity from what the photo SHOWS, not only what the text CLAIMS. A photo of a hairline crack does not justify a 90 even if the text says "huge dangerous crater".
+    - Set "photo_matches_complaint" to false when the photo has nothing to do with the described issue (a selfie, a meme, a blank wall, an unrelated indoor scene). When it is false, cap severity_score at 20 and set spam_likelihood above 70.
+    - If the photo shows the issue is clearly worse than the text suggests, raise the score and say so in "reasoning".` : ''}`;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Normalise whatever comes back into a shape the app can rely on
+    // ---------------------------------------------------------------------------
+    function normalise(raw, engine) {
+      let score = Number(raw.severity_score);
+      if (!Number.isFinite(score)) score = 40;
+      score = Math.max(0, Math.min(100, Math.round(score)));
+
+      const spam = Math.max(0, Math.min(100, Number(raw.spam_likelihood) || 0));
+      const photoMatches = raw.photo_matches_complaint === null || raw.photo_matches_complaint === undefined
+        ? null : !!raw.photo_matches_complaint;
+
+      // Hard guard: a photo that contradicts the text can't produce a critical.
+      if (photoMatches === false) score = Math.min(score, 20);
+
+      const priority = ['critical','high','medium','low'].includes(raw.priority) && photoMatches !== false
+        ? raw.priority
+        : priorityFromScore(score);
+
+      const department = DEPARTMENTS.includes(raw.department) ? raw.department : 'Public Works';
+      const category = CATEGORIES.includes(raw.category) ? raw.category : 'Other';
+
+      return {
+        engine,
+        category,
+        department,
+        score,
+        priority,
+        slaHours: slaHoursFor(priority),
+        reasoning: String(raw.reasoning || '').slice(0, 400) || 'No reasoning returned.',
+        detectedLanguage: String(raw.detected_language || 'en').slice(0, 5).toLowerCase(),
+        englishText: String(raw.english_text || '').trim(),
+        summary: String(raw.summary || '').slice(0, 120),
+        spamLikelihood: spam,
+        photoMatches,
+        photoFindings: raw.photo_findings ? String(raw.photo_findings).slice(0, 300) : null
+      };
+    }
+
+    // ---------------------------------------------------------------------------
+    // The actual call
+    // ---------------------------------------------------------------------------
+    function splitDataUrl(dataUrl) {
+      const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(dataUrl || '');
+      if (!m) return null;
+      return { mimeType: m[1], data: m[2] };
+    }
+
+    async function aiTriage({ text, photoDataUrl = null, langHint = 'en' } = {}) {
+      if (!aiConfigured()) return keywordTriage(text);
+      if (!text && !photoDataUrl) return keywordTriage(text);
+
+      const parts = [{ text: buildPrompt(text, !!photoDataUrl, langHint) }];
+      const img = splitDataUrl(photoDataUrl);
+      if (img) parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+
+      try {
+        const res = await fetch(GEMINI_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts }],
+            generationConfig: {
+              temperature: 0.15,
+              maxOutputTokens: 700,
+              responseMimeType: 'application/json'
+            }
+          })
+        });
+
+        if (!res.ok) throw new Error('Gemini HTTP ' + res.status);
+        const data = await res.json();
+        const out = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+        const cleaned = out.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleaned);
+        const result = normalise(parsed, 'gemini');
+        if (!result.englishText) result.englishText = text;
+        return result;
+      } catch (err) {
+        console.warn('[CivicSync] Gemini triage failed, falling back to keywords:', err);
+        const fb = keywordTriage(text);
+        fb.reasoning = 'AI service unreachable — scored by the offline rule engine instead.';
+        return fb;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Small translation helper, used to show an authority's free-text note back to
+    // the citizen in their own language.
+    // ---------------------------------------------------------------------------
+    async function translateText(text, targetLangCode) {
+      if (!aiConfigured() || !text || targetLangCode === 'en') return text;
+      const lang = langByCode(targetLangCode);
+      try {
+        const res = await fetch(GEMINI_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{
+              text: `Translate the following into ${lang.name}. Reply with the translation only, no quotes or notes.\n\n${text}`
+            }] }],
+            generationConfig: { temperature: 0, maxOutputTokens: 300 }
+          })
+        });
+        const data = await res.json();
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text;
+      } catch {
+        return text;
+      }
+    }
+
+
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    let tickets = [];
+    let heatFilter = 'all';
+    let map = null, heatLayer = null;
+
+    function initMap() {
+      if (map) return;
+      map = L.map('heatMap').setView([12.9716, 77.5946], 12);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors', maxZoom: 19
+      }).addTo(map);
+      setTimeout(() => map.invalidateSize(), 200);
+    }
+
+    window.setHeatFilter = function(f) {
+      heatFilter = f;
+      paintHeatButtons();
+      drawHeat();
+    };
+
+    function paintHeatButtons() {
+      document.querySelectorAll('.hm-btn').forEach(b => {
+        const on = b.dataset.hm === heatFilter;
+        b.className = `hm-btn px-2.5 py-1 rounded-lg border transition ${
+          on ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'}`;
+      });
+    }
+
+    function drawHeat() {
+      if (!map) return;
+      if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+
+      const pool = tickets.filter(tk => {
+        if (typeof tk.lat !== 'number' || typeof tk.lng !== 'number') return false;
+        if (heatFilter === 'open') return (tk.status || 'Submitted') !== 'Resolved';
+        if (heatFilter === 'critical') return tk.priority === 'critical';
+        return true;
+      });
+
+      if (!pool.length) return;
+
+      // Weight each point by severity so one live wire outranks ten litter reports.
+      const points = pool.map(tk => [tk.lat, tk.lng, Math.max(0.15, (tk.score || 40) / 100)]);
+      heatLayer = L.heatLayer(points, {
+        radius: 32, blur: 22, maxZoom: 17,
+        gradient: { 0.2: '#38bdf8', 0.45: '#22c55e', 0.65: '#f59e0b', 0.85: '#ef4444' }
+      }).addTo(map);
+
+      const bounds = L.latLngBounds(pool.map(tk => [tk.lat, tk.lng]));
+      if (bounds.isValid()) map.fitBounds(bounds.pad(0.25), { maxZoom: 15 });
+    }
+
+    function bar(label, valueLabel, pct, tone) {
+      return `
+        <div class="space-y-1">
+          <div class="flex items-center justify-between gap-3">
+            <span class="font-bold text-slate-800 truncate">${esc(label)}</span>
+            <span class="font-black text-slate-500 shrink-0">${esc(valueLabel)}</span>
+          </div>
+          <div class="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+            <div class="bar h-full bg-${tone}-500 rounded-full" style="width:${Math.max(2, Math.round(pct))}%"></div>
+          </div>
+        </div>`;
+    }
+
+    function render() {
+      const total = tickets.length;
+      const resolved = tickets.filter(tk => tk.status === 'Resolved');
+      const open = tickets.filter(tk => (tk.status || 'Submitted') !== 'Resolved');
+
+      document.getElementById('lastUpdated').innerText =
+        `${total} tickets in the register · last change ${total ? formatDate(tickets[0].timestamp) : '—'}`;
+
+      document.getElementById('kpiTotal').innerText = total;
+      document.getElementById('kpiRate').innerText = total ? Math.round(resolved.length / total * 100) + '%' : '—';
+
+      const durations = resolved
+        .map(tk => toMillis(tk.resolvedAt) - toMillis(tk.timestamp))
+        .filter(ms => ms > 0);
+      document.getElementById('kpiAvg').innerText = durations.length
+        ? formatDuration(durations.reduce((a, b) => a + b, 0) / durations.length) : '—';
+
+      const onTime = resolved.filter(tk => slaState(tk).withinSla).length;
+      document.getElementById('kpiSla').innerText = resolved.length
+        ? Math.round(onTime / resolved.length * 100) + '%' : '—';
+
+      document.getElementById('kpiOverdue').innerText = open.filter(tk => slaState(tk).overdue).length;
+
+      // ---- Departments -------------------------------------------------
+      const byDept = groupBy(tickets, tk => tk.department || 'Unassigned');
+      const deptRows = [...byDept.entries()]
+        .map(([name, list]) => {
+          const done = list.filter(x => x.status === 'Resolved').length;
+          return { name, total: list.length, done, rate: list.length ? done / list.length * 100 : 0 };
+        })
+        .sort((a, b) => b.rate - a.rate || b.total - a.total);
+      document.getElementById('deptTable').innerHTML = deptRows.length
+        ? deptRows.map(r => bar(r.name, `${Math.round(r.rate)}% · ${r.done}/${r.total}`, r.rate,
+            r.rate >= 70 ? 'emerald' : r.rate >= 40 ? 'amber' : 'red')).join('')
+        : emptyNote('No tickets routed yet.');
+
+      // ---- Wards -------------------------------------------------------
+      const byWard = groupBy(tickets, tk => tk.ward || 'Unassigned');
+      const maxWard = Math.max(1, ...[...byWard.values()].map(l => l.length));
+      const wardRows = [...byWard.entries()]
+        .map(([name, list]) => ({
+          name, total: list.length,
+          open: list.filter(x => (x.status || 'Submitted') !== 'Resolved').length
+        }))
+        .sort((a, b) => b.total - a.total).slice(0, 8);
+      document.getElementById('wardTable').innerHTML = wardRows.length
+        ? wardRows.map(r => bar(r.name, `${r.total} reports · ${r.open} open`, r.total / maxWard * 100,
+            r.open === 0 ? 'emerald' : 'blue')).join('')
+        : emptyNote('No ward data yet — file a report with a map pin.');
+
+      // ---- Categories --------------------------------------------------
+      const byCat = groupBy(tickets, tk => tk.category || 'Uncategorised');
+      const maxCat = Math.max(1, ...[...byCat.values()].map(l => l.length));
+      const catRows = [...byCat.entries()]
+        .map(([name, list]) => ({ name, total: list.length }))
+        .sort((a, b) => b.total - a.total).slice(0, 8);
+      document.getElementById('catTable').innerHTML = catRows.length
+        ? catRows.map(r => bar(r.name, `${r.total}`, r.total / maxCat * 100, 'indigo')).join('')
+        : emptyNote('Nothing categorised yet.');
+
+      // ---- Leaderboard -------------------------------------------------
+      const byCitizen = groupBy(tickets, tk => tk.reporterName || 'anonymous');
+      const board = [...byCitizen.entries()]
+        .map(([name, list]) => ({
+          name,
+          points: list.reduce((s, tk) => s + scoreForTicket(tk), 0),
+          filed: list.length,
+          resolved: list.filter(x => x.status === 'Resolved').length
+        }))
+        .sort((a, b) => b.points - a.points).slice(0, 10);
+
+      document.getElementById('leaderTable').innerHTML = board.length
+        ? board.map((c, i) => {
+            const rank = civicRank(c.points);
+            return `
+              <div class="flex items-center gap-3 p-2.5 rounded-xl ${i === 0 ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50 border border-slate-100'}">
+                <span class="w-6 text-center font-black text-slate-400">${i + 1}</span>
+                <span class="text-lg">${rank.badge}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-bold truncate">${esc(c.name)}</div>
+                  <div class="text-[10px] text-slate-500">${rank.label} · ${c.filed} filed · ${c.resolved} closed</div>
+                </div>
+                <span class="font-black text-blue-600">${c.points}</span>
+              </div>`;
+          }).join('')
+        : emptyNote('No citizens on the board yet.');
+
+      // ---- Recently fixed ----------------------------------------------
+      const fixed = resolved
+        .filter(tk => tk.resolutionPhotoData)
+        .sort((a, b) => toMillis(b.resolvedAt) - toMillis(a.resolvedAt))
+        .slice(0, 6);
+      document.getElementById('recentFixed').innerHTML = fixed.length
+        ? fixed.map(tk => `
+            <div class="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+              <img src="${tk.resolutionPhotoData}" class="w-full h-32 object-cover" alt="Photo taken after the repair" />
+              <div class="p-3 space-y-1">
+                <div class="font-mono text-[10px] font-black text-slate-500">${esc(tk.ticketId)}</div>
+                <div class="text-xs font-bold leading-snug">${esc(tk.summary || tk.text || '')}</div>
+                <div class="text-[10px] text-slate-500">${esc(tk.department || '')} · closed in ${
+                  esc(formatDuration(toMillis(tk.resolvedAt) - toMillis(tk.timestamp)))}</div>
+              </div>
+            </div>`).join('')
+        : emptyNote('No verified fixes yet.');
+
+      drawHeat();
+    }
+
+    function emptyNote(msg) {
+      return `<div class="text-[11px] text-slate-400 py-4 text-center">${esc(msg)}</div>`;
+    }
+
+    function groupBy(arr, keyFn) {
+      const m = new Map();
+      arr.forEach(item => {
+        const k = keyFn(item);
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(item);
+      });
+      return m;
+    }
+
+    initMap();
+    paintHeatButtons();
+
+    onSnapshot(collection(db, 'complaints'), (snap) => {
+      tickets = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp));
+      render();
+    }, (err) => {
+      console.error(err);
+      document.getElementById('lastUpdated').innerText =
+        'Could not read the ticket register. Check the Firestore read rules.';
+    });
+
+    // Overdue counters move even when nothing is written.
+    setInterval(() => { if (tickets.length) render(); }, 60000);
+  </script>
+</body>
+</html>
